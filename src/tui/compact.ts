@@ -42,7 +42,7 @@ export function formatSessionCachePart(
   const ratio = totalInput > 0 ? Math.round((cacheReadTokens / totalInput) * 100) : 0;
   const formattedCount = formatTokenCount(cacheReadTokens);
   return {
-    text: `⚡ ${ratio}% (${formattedCount})`,
+    text: `⚡${ratio}% (${formattedCount})`,
     hitRatio: ratio,
     cachedTokens: cacheReadTokens,
   };
