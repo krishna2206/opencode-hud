@@ -20,10 +20,33 @@ export type CompactPart =
   | { kind: "label"; text: string }
   | { kind: "separator"; text: string }
   | { kind: "percent"; text: string; percentRemaining: number }
+  | { kind: "cache"; text: string; hitRatio: number; cachedTokens: number }
   | { kind: "error"; text: string };
 
 const SEPARATOR = " | ";
 const WINDOW_SEPARATOR = " · ";
+
+export function formatTokenCount(count: number): string {
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
+  if (count >= 10_000) return `${Math.round(count / 1_000)}K`;
+  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}K`;
+  return String(count);
+}
+
+export function formatSessionCachePart(
+  inputTokens: number,
+  cacheReadTokens: number,
+): { text: string; hitRatio: number; cachedTokens: number } | null {
+  if (cacheReadTokens <= 0) return null;
+  const totalInput = inputTokens + cacheReadTokens;
+  const ratio = totalInput > 0 ? Math.round((cacheReadTokens / totalInput) * 100) : 0;
+  const formattedCount = formatTokenCount(cacheReadTokens);
+  return {
+    text: `⚡ ${ratio}% (${formattedCount})`,
+    hitRatio: ratio,
+    cachedTokens: cacheReadTokens,
+  };
+}
 
 function compactText(text: string): string {
   return sanitizeText(text);

@@ -12,6 +12,7 @@ import {
   buildCompactLine,
   COMPACT_LOADING_TEXT,
   COMPACT_UNAVAILABLE_TEXT,
+  formatSessionCachePart,
   type CompactLine,
   type CompactPart,
 } from "./tui/compact.js";
@@ -198,14 +199,50 @@ function compactPartColor(part: CompactPart, theme: TuiPluginApi["theme"]["curre
     }
   }
 
+  if (part.kind === "cache") {
+    if (part.hitRatio >= 50) return theme.success;
+    if (part.hitRatio > 0) return theme.warning;
+    return theme.textMuted;
+  }
+
   return theme.textMuted;
 }
 
-function CompactStatusLine(props: { api: TuiPluginApi; state: () => CompactState }) {
+function CompactStatusLine(props: {
+  api: TuiPluginApi;
+  state: () => CompactState;
+  sessionID?: string;
+}) {
   const parts = () => {
     const state = props.state();
     if (state.status !== "ready") return [];
-    return state.line.parts;
+
+    const baseParts = [...state.line.parts];
+
+    // Live session prompt-cache stats (rendered if cache hit > 0%)
+    if (props.sessionID) {
+      try {
+        const session = props.api.state.session.get(props.sessionID) as any;
+        const cacheRead = session?.tokens?.cache?.read ?? 0;
+        const input = session?.tokens?.input ?? 0;
+        const cachePart = formatSessionCachePart(input, cacheRead);
+        if (cachePart) {
+          baseParts.push(
+            { kind: "separator", text: " · " },
+            {
+              kind: "cache",
+              text: cachePart.text,
+              hitRatio: cachePart.hitRatio,
+              cachedTokens: cachePart.cachedTokens,
+            },
+          );
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    return baseParts;
   };
 
   const mutedText = () => {
@@ -261,7 +298,12 @@ function GitLine(props: { api: TuiPluginApi; git: () => GitState }) {
   );
 }
 
-function StatusLine(props: { api: TuiPluginApi; compact: () => CompactState; git: () => GitState }) {
+function StatusLine(props: {
+  api: TuiPluginApi;
+  compact: () => CompactState;
+  git: () => GitState;
+  sessionID?: string;
+}) {
   const visible = () => {
     if (props.git().status === "ready") return true;
 
@@ -278,7 +320,7 @@ function StatusLine(props: { api: TuiPluginApi; compact: () => CompactState; git
         width="100%"
       >
         <GitLine api={props.api} git={props.git} />
-        <CompactStatusLine api={props.api} state={props.compact} />
+        <CompactStatusLine api={props.api} state={props.compact} sessionID={props.sessionID} />
       </box>
     </Show>
   );
@@ -307,7 +349,7 @@ function SessionPromptWithStatus(props: {
         onSubmit={props.onSubmit}
         ref={props.promptRef}
       />
-      <StatusLine api={props.api} compact={props.quota.state} git={props.git} />
+      <StatusLine api={props.api} compact={props.quota.state} git={props.git} sessionID={props.sessionID} />
     </box>
   );
 }
