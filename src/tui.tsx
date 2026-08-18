@@ -187,6 +187,34 @@ function getQuotaState(api: TuiPluginApi): QuotaStateHandle {
   return handle;
 }
 
+/**
+ * Prompt-cache stats from the most recent assistant step of the session.
+ * Uses the last assistant message's token usage (per-step) rather than the
+ * session cumulative counters, so a cache regression is visible immediately.
+ * Returns null when no assistant message has usable token data yet.
+ */
+function lastStepCachePart(api: TuiPluginApi, sessionID: string): {
+  text: string;
+  hitRatio: number;
+  cachedTokens: number;
+} | null {
+  const messages = api.state.session.messages(sessionID);
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index] as unknown;
+    if (!message || typeof message !== "object") continue;
+    const record = message as {
+      role?: string;
+      tokens?: { input?: number; cache?: { read?: number } };
+    };
+    if (record.role !== "assistant") continue;
+    const input = record.tokens?.input ?? 0;
+    const cacheRead = record.tokens?.cache?.read ?? 0;
+    if (input <= 0 && cacheRead <= 0) continue;
+    return formatSessionCachePart(input, cacheRead);
+  }
+  return null;
+}
+
 function compactPartColor(part: CompactPart, theme: TuiPluginApi["theme"]["current"]): RGBA | undefined {
   if (part.kind === "error") return theme.error;
 
@@ -219,13 +247,10 @@ function CompactStatusLine(props: {
 
     const baseParts = [...state.line.parts];
 
-    // Live session prompt-cache stats (rendered if cache hit > 0%)
+    // Live prompt-cache stats from the last assistant step (rendered if cache hit > 0%)
     if (props.sessionID) {
       try {
-        const session = props.api.state.session.get(props.sessionID) as any;
-        const cacheRead = session?.tokens?.cache?.read ?? 0;
-        const input = session?.tokens?.input ?? 0;
-        const cachePart = formatSessionCachePart(input, cacheRead);
+        const cachePart = lastStepCachePart(props.api, props.sessionID);
         if (cachePart) {
           baseParts.push(
             { kind: "separator", text: " · " },
