@@ -6,6 +6,7 @@ import { createEffect, createSignal, Show } from "solid-js";
 import type { Provider, SessionModelMeta } from "./providers/types.js";
 import { antigravityProvider } from "./providers/antigravity/index.js";
 import { opencodeGoProvider } from "./providers/opencode-go/index.js";
+import { claudeCodeProvider } from "./providers/claude-code/index.js";
 import { collectQuota, type CollectResult } from "./refresh/collect.js";
 import { createRefreshLifecycle } from "./refresh/lifecycle.js";
 import {
@@ -30,7 +31,11 @@ const REQUEST_TIMEOUT_MS = 5_000;
 const COMPACT_PERCENT_WARNING_THRESHOLD = 50;
 const COMPACT_PERCENT_ERROR_THRESHOLD = 20;
 
-const PROVIDERS: readonly Provider[] = [antigravityProvider, opencodeGoProvider];
+const PROVIDERS: readonly Provider[] = [
+  antigravityProvider,
+  opencodeGoProvider,
+  claudeCodeProvider,
+];
 
 type TuiPromptRefCallback = (ref: TuiPromptRef | undefined) => void;
 
