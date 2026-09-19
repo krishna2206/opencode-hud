@@ -7,6 +7,7 @@ import type { Provider, SessionModelMeta } from "./providers/types.js";
 import { antigravityProvider } from "./providers/antigravity/index.js";
 import { opencodeGoProvider } from "./providers/opencode-go/index.js";
 import { claudeCodeProvider } from "./providers/claude-code/index.js";
+import { codexProvider } from "./providers/codex/index.js";
 import { collectQuota, type CollectResult } from "./refresh/collect.js";
 import { createRefreshLifecycle } from "./refresh/lifecycle.js";
 import {
@@ -35,6 +36,7 @@ const PROVIDERS: readonly Provider[] = [
   antigravityProvider,
   opencodeGoProvider,
   claudeCodeProvider,
+  codexProvider,
 ];
 
 type TuiPromptRefCallback = (ref: TuiPromptRef | undefined) => void;
