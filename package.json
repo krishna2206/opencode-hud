@@ -29,7 +29,8 @@
   ],
   "scripts": {
     "build": "node scripts/clean-dist.mjs && tsc && node scripts/prepare-tui-dist.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test tests"
   },
   "devDependencies": {
     "@babel/core": "^7.28.0",

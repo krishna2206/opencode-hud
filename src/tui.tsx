@@ -10,6 +10,7 @@ import { claudeCodeProvider } from "./providers/claude-code/index.js";
 import { codexProvider } from "./providers/codex/index.js";
 import { collectQuota, type CollectResult } from "./refresh/collect.js";
 import { createRefreshLifecycle } from "./refresh/lifecycle.js";
+import { throttleLeading } from "./refresh/throttle.js";
 import {
   buildCompactLine,
   COMPACT_LOADING_TEXT,
@@ -26,6 +27,12 @@ const COMPACT_ORDER = 90;
 
 const REFRESH_INTERVAL_MS = 60_000;
 const EVENT_REFRESH_DELAYS_MS = [150, 600] as const;
+/**
+ * `message.updated` fires continuously while a response streams. Quota does not
+ * move token by token, so it is collapsed to one refresh per window; the exact
+ * value after a turn comes from `session.idle`.
+ */
+const STREAMING_REFRESH_THROTTLE_MS = 30_000;
 const MOUNT_RECOVERY_DELAYS_MS = [500, 1_500, 4_000] as const;
 const REQUEST_TIMEOUT_MS = 5_000;
 
@@ -161,10 +168,17 @@ function getQuotaState(api: TuiPluginApi): QuotaStateHandle {
     eventRefreshDelaysMs: EVENT_REFRESH_DELAYS_MS,
     recoveryDelaysMs: MOUNT_RECOVERY_DELAYS_MS,
     subscribe: (scheduleRefresh) => [
+      // A turn finished: this is the moment quota actually changed.
+      api.event.on("session.idle" as never, () => scheduleRefresh()),
       api.event.on("session.updated" as never, () => scheduleRefresh()),
-      api.event.on("message.updated" as never, () => scheduleRefresh()),
       api.event.on("message.removed" as never, () => scheduleRefresh()),
       api.event.on("tui.session.select" as never, () => scheduleRefresh()),
+      // Kept for long agentic runs, where `session.idle` only fires at the very
+      // end — throttled, so a streaming burst costs one refresh per window.
+      api.event.on(
+        "message.updated" as never,
+        throttleLeading(scheduleRefresh, STREAMING_REFRESH_THROTTLE_MS),
+      ),
     ],
   });
 
@@ -401,7 +415,10 @@ function setupGitState(api: TuiPluginApi): () => GitState {
         ? directory
         : undefined;
 
-  if (gitRoot) {
+  // `api.state.vcs` is undefined outside a repository. Without this guard the
+  // watcher was created for every non-git directory too — the home directory
+  // among them — and spawned a failing `git status` on every file event.
+  if (gitRoot && api.state.vcs) {
     const watcher = createGitStatusWatcher({
       worktree: gitRoot,
       subscribe: (type, handler) => api.event.on(type as never, handler),
