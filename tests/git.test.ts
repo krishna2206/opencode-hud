@@ -1,258 +1,110 @@
 import { describe, expect, it } from "bun:test";
-import {
-  createGitStatusWatcher,
-  isIgnoredPath,
-  type GitEventSubscribe,
-  type GitState,
-  type GitStatusResult,
-} from "../src/tui/git.js";
+import { createGitSource, deriveGitState, GIT_REFRESH_EVENTS, type GitState } from "../src/hud/git";
 
-function tick(ms = 0): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function makeBus() {
-  const handlers = new Map<string, Set<(event: unknown) => void>>();
-
-  const subscribe: GitEventSubscribe = (type, handler) => {
-    let set = handlers.get(type);
-    if (!set) {
-      set = new Set();
-      handlers.set(type, set);
-    }
-    set.add(handler);
-    return () => {
-      set?.delete(handler);
-    };
-  };
-
-  return {
-    subscribe,
-    emit: (type: string, event?: unknown) => {
-      for (const handler of handlers.get(type) ?? []) handler(event);
-    },
-    listeners: (type: string) => handlers.get(type)?.size ?? 0,
-  };
-}
-
-function fileEvent(file: string) {
-  return { type: "file.watcher.updated", properties: { file, event: "change" } };
-}
-
-describe("isIgnoredPath", () => {
-  it("ignores build and dependency directories at any depth", () => {
-    expect(isIgnoredPath("node_modules/foo/index.js")).toBe(true);
-    expect(isIgnoredPath("packages/app/node_modules/foo.js")).toBe(true);
-    expect(isIgnoredPath(".next/dev/build/chunk.js")).toBe(true);
-    expect(isIgnoredPath("apps/web/.next/server/page.js")).toBe(true);
-    expect(isIgnoredPath("dist/index.js")).toBe(true);
-    expect(isIgnoredPath("target/debug/app")).toBe(true);
-    expect(isIgnoredPath("api/__pycache__/mod.cpython-311.pyc")).toBe(true);
+describe("deriveGitState", () => {
+  it("is no-repo outside a repository", () => {
+    expect(deriveGitState(undefined, undefined)).toEqual({ status: "no-repo" });
+    expect(deriveGitState({ branch: { current: "main" } }, 0)).toEqual({ status: "no-repo" });
   });
 
-  it("keeps source files, including look-alike names", () => {
-    expect(isIgnoredPath("src/tui/git.ts")).toBe(false);
-    expect(isIgnoredPath("README.md")).toBe(false);
-    expect(isIgnoredPath("src/dist-helpers.ts")).toBe(false);
-    expect(isIgnoredPath("scripts/build.mjs")).toBe(false);
-    expect(isIgnoredPath("build/script.sh")).toBe(false);
-    expect(isIgnoredPath(undefined)).toBe(false);
-    expect(isIgnoredPath("")).toBe(false);
+  it("is no-repo on a detached head, where there is no branch to show", () => {
+    expect(deriveGitState({ provider: "git", branch: {} }, 0)).toEqual({ status: "no-repo" });
+  });
+
+  it("reports clean and dirty trees", () => {
+    expect(deriveGitState({ provider: "git", branch: { current: "main" } }, 0)).toEqual({
+      status: "ready",
+      branch: "main",
+      dirty: false,
+    });
+    expect(deriveGitState({ provider: "git", branch: { current: "feat" } }, 3)).toEqual({
+      status: "ready",
+      branch: "feat",
+      dirty: true,
+    });
   });
 });
 
-describe("createGitStatusWatcher", () => {
-  const ready: GitStatusResult = { branch: "main", dirty: false };
+function harness(overrides: { provider?: string; changed?: number } = {}) {
+  const handlers = new Map<string, () => void>();
+  const states: GitState[] = [];
+  let statusCalls = 0;
+  let changed = overrides.changed ?? 0;
+  const source = createGitSource({
+    info: () => ({ provider: overrides.provider ?? "git", branch: { current: "main" } }),
+    syncInfo: async () => {},
+    changedFiles: async () => {
+      statusCalls += 1;
+      return changed;
+    },
+    subscribe: (type, handler) => {
+      handlers.set(type, handler);
+      return () => handlers.delete(type);
+    },
+    onState: (state) => states.push(state),
+    debounceMs: 5,
+    pollMs: 60_000,
+  });
+  return {
+    source,
+    handlers,
+    states,
+    statusCalls: () => statusCalls,
+    setChanged: (n: number) => (changed = n),
+  };
+}
 
-  it("shuts itself down outside a repository", async () => {
-    const bus = makeBus();
-    let runs = 0;
-    const states: GitState[] = [];
-
-    createGitStatusWatcher({
-      worktree: "/Users/krishna",
-      subscribe: bus.subscribe,
-      onState: (state) => states.push(state),
-      run: async () => {
-        runs += 1;
-        return null;
-      },
-      debounceMs: 5,
-    });
-
-    await tick(10);
-
-    expect(runs).toBe(1);
-    expect(states).toEqual([{ status: "no-repo" }]);
-    expect(bus.listeners("file.edited")).toBe(0);
-    expect(bus.listeners("file.watcher.updated")).toBe(0);
-    expect(bus.listeners("vcs.branch.updated")).toBe(0);
-
-    // Whatever happens next must not spawn anything.
-    bus.emit("file.edited");
-    bus.emit("file.watcher.updated", fileEvent("src/index.ts"));
-    await tick(20);
-    expect(runs).toBe(1);
+describe("createGitSource", () => {
+  it("publishes the state once on start", async () => {
+    const h = harness({ changed: 2 });
+    await sleep(10);
+    expect(h.states.at(-1)).toEqual({ status: "ready", branch: "main", dirty: true });
+    h.source.dispose();
   });
 
-  it("ignores watcher noise from build directories", async () => {
-    const bus = makeBus();
-    let runs = 0;
-
-    createGitStatusWatcher({
-      worktree: "/repo",
-      subscribe: bus.subscribe,
-      onState: () => {},
-      run: async () => {
-        runs += 1;
-        return ready;
-      },
-      debounceMs: 5,
-    });
-
-    await tick(10);
-    expect(runs).toBe(1);
-
-    for (let i = 0; i < 50; i += 1) {
-      bus.emit("file.watcher.updated", fileEvent(`.next/dev/build/chunk-${i}.js`));
-    }
-    await tick(20);
-    expect(runs).toBe(1);
-
-    bus.emit("file.watcher.updated", fileEvent("src/index.ts"));
-    await tick(20);
-    expect(runs).toBe(2);
+  it("subscribes to every refresh event", () => {
+    const h = harness();
+    expect([...h.handlers.keys()].sort()).toEqual([...GIT_REFRESH_EVENTS].sort());
+    h.source.dispose();
   });
 
-  it("still refreshes when opencode edits an otherwise ignored path", async () => {
-    const bus = makeBus();
-    let runs = 0;
-
-    createGitStatusWatcher({
-      worktree: "/repo",
-      subscribe: bus.subscribe,
-      onState: () => {},
-      run: async () => {
-        runs += 1;
-        return ready;
-      },
-      debounceMs: 5,
-    });
-
-    await tick(10);
-    expect(runs).toBe(1);
-
-    bus.emit("file.edited", { type: "file.edited", properties: { file: "dist/index.js" } });
-    await tick(20);
-    expect(runs).toBe(2);
+  it("refreshes after a filesystem change", async () => {
+    const h = harness({ changed: 0 });
+    await sleep(10);
+    h.setChanged(1);
+    h.handlers.get("filesystem.changed")?.();
+    await sleep(20);
+    expect(h.states.at(-1)).toEqual({ status: "ready", branch: "main", dirty: true });
+    h.source.dispose();
   });
 
-  it("collapses a burst of source events into a single run", async () => {
-    const bus = makeBus();
-    let runs = 0;
-
-    createGitStatusWatcher({
-      worktree: "/repo",
-      subscribe: bus.subscribe,
-      onState: () => {},
-      run: async () => {
-        runs += 1;
-        return ready;
-      },
-      debounceMs: 20,
-    });
-
-    await tick(5);
-    expect(runs).toBe(1);
-
-    for (let i = 0; i < 30; i += 1) {
-      bus.emit("file.watcher.updated", fileEvent(`src/file-${i}.ts`));
-    }
-    await tick(60);
-
-    expect(runs).toBe(2);
+  it("collapses a burst of events into one status call", async () => {
+    const h = harness();
+    await sleep(10);
+    const before = h.statusCalls();
+    for (let i = 0; i < 20; i++) h.handlers.get("filesystem.changed")?.();
+    await sleep(25);
+    expect(h.statusCalls() - before).toBe(1);
+    h.source.dispose();
   });
 
-  it("emits only when the branch or dirty flag actually changed", async () => {
-    const bus = makeBus();
-    const states: GitState[] = [];
-    let dirty = false;
-
-    createGitStatusWatcher({
-      worktree: "/repo",
-      subscribe: bus.subscribe,
-      onState: (state) => states.push(state),
-      run: async () => ({ branch: "main", dirty }),
-      debounceMs: 5,
-    });
-
-    await tick(10);
-    expect(states).toHaveLength(1);
-
-    // Three refreshes, same result: the signal must stay quiet.
-    for (let i = 0; i < 3; i += 1) {
-      bus.emit("file.edited");
-      await tick(15);
-    }
-    expect(states).toHaveLength(1);
-
-    dirty = true;
-    bus.emit("file.edited");
-    await tick(15);
-
-    expect(states).toHaveLength(2);
-    expect(states[1]).toEqual({ status: "ready", branch: "main", dirty: true });
+  it("does not ask for status outside a repository", async () => {
+    const h = harness({ provider: "" });
+    await sleep(10);
+    expect(h.statusCalls()).toBe(0);
+    expect(h.states.at(-1)).toEqual({ status: "no-repo" });
+    h.source.dispose();
   });
 
-  it("shows a new branch immediately, before git confirms it", async () => {
-    const bus = makeBus();
-    const states: GitState[] = [];
-
-    createGitStatusWatcher({
-      worktree: "/repo",
-      subscribe: bus.subscribe,
-      onState: (state) => states.push(state),
-      run: async () => ({ branch: "main", dirty: true }),
-      debounceMs: 50,
-    });
-
-    await tick(10);
-    expect(states).toEqual([{ status: "ready", branch: "main", dirty: true }]);
-
-    bus.emit("vcs.branch.updated", {
-      type: "vcs.branch.updated",
-      properties: { branch: "feature" },
-    });
-
-    // No git run yet — the name came straight from the event payload.
-    expect(states[1]).toEqual({ status: "ready", branch: "feature", dirty: true });
-  });
-
-  it("never runs two git processes at once", async () => {
-    const bus = makeBus();
-    let running = 0;
-    let maxConcurrent = 0;
-
-    createGitStatusWatcher({
-      worktree: "/repo",
-      subscribe: bus.subscribe,
-      onState: () => {},
-      run: async () => {
-        running += 1;
-        maxConcurrent = Math.max(maxConcurrent, running);
-        await tick(15);
-        running -= 1;
-        return ready;
-      },
-      debounceMs: 1,
-    });
-
-    for (let i = 0; i < 20; i += 1) {
-      bus.emit("file.edited");
-      await tick(2);
-    }
-    await tick(60);
-
-    expect(maxConcurrent).toBe(1);
+  it("unsubscribes and stays quiet after dispose", async () => {
+    const h = harness();
+    await sleep(10);
+    h.source.dispose();
+    expect(h.handlers.size).toBe(0);
+    const count = h.states.length;
+    await sleep(20);
+    expect(h.states.length).toBe(count);
   });
 });

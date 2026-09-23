@@ -8,12 +8,13 @@ import solidPreset from "babel-preset-solid";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 const sourcePath = path.join(rootDir, "src", "tui.tsx");
-const distSourcePath = path.join(rootDir, "dist", "tui.tsx");
 const distJsPath = path.join(rootDir, "dist", "tui.js");
 const distJsxPath = path.join(rootDir, "dist", "tui.jsx");
 const distJsxMapPath = path.join(rootDir, "dist", "tui.jsx.map");
 
-await fs.copyFile(sourcePath, distSourcePath);
+// No copy of tui.tsx in dist: opencode 2 resolves the TUI entry as <dist>/tui and
+// prefers .tsx over .js, so a copied source would shadow the compiled module.
+await fs.rm(path.join(rootDir, "dist", "tui.tsx"), { force: true });
 const source = await fs.readFile(sourcePath, "utf8");
 const transformed = await babel.transformAsync(source, {
   filename: sourcePath,

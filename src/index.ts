@@ -1,25 +1,14 @@
 /**
  * OpenCode HUD server plugin.
  *
- * Minimal: the server part exists to satisfy the plugin loader. All the HUD
- * logic lives in the TUI module (compact quota line + git branch).
+ * Empty on purpose. opencode 2 only loads a local package that has a server
+ * entrypoint, and reports its TUI entrypoint alongside it; the HUD itself lives
+ * entirely in the TUI module (see tui.tsx).
  */
 
-import type { Plugin } from "@opencode-ai/plugin";
+import { Plugin } from "@opencode/plugin";
 
-export const HUDPlugin: Plugin = async () => {
-  // Intentionally empty: the HUD renders in the TUI, no server surface needed.
-  return {};
-};
-
-type V1PluginModule = {
-  id: string;
-  server: typeof HUDPlugin;
-};
-
-const pluginModule = {
+export default Plugin.define({
   id: "opencode-hud",
-  server: HUDPlugin,
-} satisfies V1PluginModule;
-
-export default pluginModule;
+  setup: () => {},
+});

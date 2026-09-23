@@ -1,6 +1,6 @@
 /** @jsxImportSource @opentui/solid */
 
-import type { TuiPlugin, TuiPluginApi, TuiPluginModule, TuiPromptRef } from "@opencode-ai/plugin/tui";
+import { Plugin } from "@opencode/plugin/tui";
 import type { RGBA } from "@opentui/core";
 import { createEffect, createSignal, Show } from "solid-js";
 import type { Provider, SessionModelMeta } from "./providers/types.js";
@@ -18,12 +18,14 @@ import {
   formatSessionCachePart,
   type CompactLine,
   type CompactPart,
-} from "./tui/compact.js";
-import type { GitState } from "./tui/git.js";
-import { createGitStatusWatcher } from "./tui/git.js";
+} from "./hud/compact.js";
+import type { GitState } from "./hud/git.js";
+import { createGitSource } from "./hud/git.js";
+
+type Ctx = Plugin.Context;
+type Theme = Ctx["theme"];
 
 const id = "opencode-hud";
-const COMPACT_ORDER = 90;
 
 const REFRESH_INTERVAL_MS = 60_000;
 const EVENT_REFRESH_DELAYS_MS = [150, 600] as const;
@@ -45,8 +47,6 @@ const PROVIDERS: readonly Provider[] = [
   claudeCodeProvider,
   codexProvider,
 ];
-
-type TuiPromptRefCallback = (ref: TuiPromptRef | undefined) => void;
 
 type CompactState =
   | { status: "disabled" }
@@ -79,64 +79,48 @@ function extractSessionModelMeta(input: unknown): SessionModelMeta {
 }
 
 /**
- * Resolve the model in use for a session. Order: TUI session state, then the
- * client lookup, then the last assistant message. Returns {} when unknown.
+ * Resolve the model in use for a session: the session record first, then the
+ * last assistant message. The data layer may not have synced a session the
+ * host has not rendered yet, so a miss triggers one sync before giving up.
  */
-async function getTuiSessionModelMeta(api: TuiPluginApi, sessionID: string): Promise<SessionModelMeta> {
-  const stateSession = api.state.session as { get?: (sessionID: string) => unknown };
-  try {
-    const meta = extractSessionModelMeta(stateSession.get?.(sessionID));
+async function getSessionModelMeta(ctx: Ctx, sessionID: string): Promise<SessionModelMeta> {
+  const fromData = (): SessionModelMeta => {
+    const meta = extractSessionModelMeta(ctx.data.session.get(sessionID));
     if (meta.providerID || meta.modelID) return meta;
-  } catch {
-    // fall through to the client below
-  }
-
-  try {
-    const sessionGet = (
-      api.client.session as {
-        get?: (params: { sessionID: string }) => Promise<{ data?: unknown }>;
+    const messages = ctx.data.session.message.list(sessionID);
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message?.type === "assistant") {
+        const fromMessage = extractSessionModelMeta(message);
+        if (fromMessage.providerID || fromMessage.modelID) return fromMessage;
       }
-    ).get;
-    const response = await sessionGet?.({ sessionID });
-    const meta = extractSessionModelMeta(response?.data);
-    if (meta.providerID || meta.modelID) return meta;
-  } catch {
-    // fall through to message state below
-  }
-
-  const messages = api.state.session.messages(sessionID);
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const item = messages[index] as unknown;
-    if (!item || typeof item !== "object") continue;
-    const record = item as { role?: string; providerID?: string; modelID?: string };
-    if (record.role === "assistant" && (record.providerID || record.modelID)) {
-      return { providerID: record.providerID, modelID: record.modelID };
     }
-  }
+    return {};
+  };
 
-  return {};
+  const first = fromData();
+  if (first.providerID || first.modelID) return first;
+  await ctx.data.session.sync(sessionID).catch(() => {});
+  return fromData();
 }
 
 function activeProviders(activeIds: string[]): Provider[] {
   return PROVIDERS.filter((provider) => activeIds.includes(provider.id));
 }
 
-interface QuotaStateHandle {
+interface QuotaState {
   state: () => CompactState;
-  resolveSession: (sessionID: string) => Promise<void>;
+  resolveSession: (sessionID: string | undefined) => Promise<void>;
+  dispose: () => void;
 }
 
-const quotaStates = new WeakMap<TuiPluginApi, QuotaStateHandle>();
-
-function getQuotaState(api: TuiPluginApi): QuotaStateHandle {
-  const existing = quotaStates.get(api);
-  if (existing) return existing;
-
+function createQuotaState(ctx: Ctx): QuotaState {
   const [state, setState] = createSignal<CompactState>({ status: "disabled" });
   const [activeIds, setActiveIds] = createSignal<string[]>([]);
   let previous: CompactState = { status: "disabled" };
   let appliedIds = new Set<string>();
   let resolveVersion = 0;
+  let resolvedFor: string | undefined;
 
   const lifecycle = createRefreshLifecycle({
     load: async () => {
@@ -169,43 +153,49 @@ function getQuotaState(api: TuiPluginApi): QuotaStateHandle {
     recoveryDelaysMs: MOUNT_RECOVERY_DELAYS_MS,
     subscribe: (scheduleRefresh) => [
       // A turn finished: this is the moment quota actually changed.
-      api.event.on("session.idle" as never, () => scheduleRefresh()),
-      api.event.on("session.updated" as never, () => scheduleRefresh()),
-      api.event.on("message.removed" as never, () => scheduleRefresh()),
-      api.event.on("tui.session.select" as never, () => scheduleRefresh()),
-      // Kept for long agentic runs, where `session.idle` only fires at the very
-      // end — throttled, so a streaming burst costs one refresh per window.
-      api.event.on(
-        "message.updated" as never,
-        throttleLeading(scheduleRefresh, STREAMING_REFRESH_THROTTLE_MS),
+      ctx.data.on("session.idle", () => scheduleRefresh()),
+      ctx.data.on("session.revert.committed", () => scheduleRefresh()),
+      // Long agentic runs only go idle at the very end; usage updates arrive
+      // per step, throttled so a run costs one refresh per window.
+      ctx.data.on(
+        "session.usage.updated",
+        throttleLeading(() => scheduleRefresh(), STREAMING_REFRESH_THROTTLE_MS),
       ),
+      // A model switch can change which quota applies.
+      ctx.data.on("session.model.selected", () => {
+        resolvedFor = undefined;
+        void resolve(currentSession);
+      }),
     ],
   });
 
-  const handle: QuotaStateHandle = {
-    state,
-    resolveSession: async (sessionID: string) => {
-      const version = ++resolveVersion;
-      if (!sessionID) {
-        setActiveIds([]);
-        lifecycle.reload();
-        return;
-      }
-
-      const meta = await getTuiSessionModelMeta(api, sessionID);
-      if (version !== resolveVersion) return;
-
-      const ids = PROVIDERS.filter((provider) => provider.matchesModel(meta)).map(
-        (provider) => provider.id,
-      );
-      setActiveIds(ids);
+  let currentSession: string | undefined;
+  const resolve = async (sessionID: string | undefined) => {
+    currentSession = sessionID;
+    if (sessionID === resolvedFor) return;
+    resolvedFor = sessionID;
+    const version = ++resolveVersion;
+    if (!sessionID) {
+      setActiveIds([]);
       lifecycle.reload();
-    },
+      return;
+    }
+
+    const meta = await getSessionModelMeta(ctx, sessionID);
+    if (version !== resolveVersion) return;
+
+    const ids = PROVIDERS.filter((provider) => provider.matchesModel(meta)).map(
+      (provider) => provider.id,
+    );
+    setActiveIds(ids);
+    lifecycle.reload();
   };
 
-  api.lifecycle.onDispose(lifecycle.dispose);
-  quotaStates.set(api, handle);
-  return handle;
+  return {
+    state,
+    resolveSession: resolve,
+    dispose: lifecycle.dispose,
+  };
 }
 
 /**
@@ -214,54 +204,49 @@ function getQuotaState(api: TuiPluginApi): QuotaStateHandle {
  * session cumulative counters, so a cache regression is visible immediately.
  * Returns null when no assistant message has usable token data yet.
  */
-function lastStepCachePart(api: TuiPluginApi, sessionID: string): {
+function lastStepCachePart(ctx: Ctx, sessionID: string): {
   text: string;
   hitRatio: number;
   cachedTokens: number;
 } | null {
-  const messages = api.state.session.messages(sessionID);
+  const messages = ctx.data.session.message.list(sessionID);
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index] as unknown;
-    if (!message || typeof message !== "object") continue;
-    const record = message as {
-      role?: string;
-      tokens?: { input?: number; cache?: { read?: number } };
-    };
-    if (record.role !== "assistant") continue;
-    const input = record.tokens?.input ?? 0;
-    const cacheRead = record.tokens?.cache?.read ?? 0;
+    const message = messages[index];
+    if (message?.type !== "assistant") continue;
+    const input = message.tokens?.input ?? 0;
+    const cacheRead = message.tokens?.cache?.read ?? 0;
     if (input <= 0 && cacheRead <= 0) continue;
     return formatSessionCachePart(input, cacheRead);
   }
   return null;
 }
 
-function compactPartColor(part: CompactPart, theme: TuiPluginApi["theme"]["current"]): RGBA | undefined {
-  if (part.kind === "error") return theme.error;
+function feedback(theme: Theme, kind: "success" | "warning" | "error"): RGBA {
+  return theme.text.feedback[kind].base;
+}
+
+function compactPartColor(part: CompactPart, theme: Theme): RGBA | undefined {
+  if (part.kind === "error") return feedback(theme, "error");
 
   if (part.kind === "percent") {
     const remaining = part.percentRemaining;
     if (Number.isFinite(remaining)) {
-      if (remaining >= COMPACT_PERCENT_WARNING_THRESHOLD) return theme.success;
-      if (remaining >= COMPACT_PERCENT_ERROR_THRESHOLD) return theme.warning;
-      return theme.error;
+      if (remaining >= COMPACT_PERCENT_WARNING_THRESHOLD) return feedback(theme, "success");
+      if (remaining >= COMPACT_PERCENT_ERROR_THRESHOLD) return feedback(theme, "warning");
+      return feedback(theme, "error");
     }
   }
 
   if (part.kind === "cache") {
-    if (part.hitRatio >= 50) return theme.success;
-    if (part.hitRatio > 0) return theme.warning;
-    return theme.textMuted;
+    if (part.hitRatio >= 50) return feedback(theme, "success");
+    if (part.hitRatio > 0) return feedback(theme, "warning");
+    return theme.text.muted;
   }
 
-  return theme.textMuted;
+  return theme.text.muted;
 }
 
-function CompactStatusLine(props: {
-  api: TuiPluginApi;
-  state: () => CompactState;
-  sessionID?: string;
-}) {
+function CompactStatusLine(props: { ctx: Ctx; state: () => CompactState; sessionID?: string }) {
   const parts = () => {
     const state = props.state();
     if (state.status !== "ready") return [];
@@ -271,7 +256,7 @@ function CompactStatusLine(props: {
     // Live prompt-cache stats from the last assistant step (rendered if cache hit > 0%)
     if (props.sessionID) {
       try {
-        const cachePart = lastStepCachePart(props.api, props.sessionID);
+        const cachePart = lastStepCachePart(props.ctx, props.sessionID);
         if (cachePart) {
           baseParts.push(
             { kind: "separator", text: " · " },
@@ -303,12 +288,12 @@ function CompactStatusLine(props: {
       <box flexDirection="row">
         {parts().length > 0 ? (
           parts().map((part) => (
-            <text fg={compactPartColor(part, props.api.theme.current)} wrapMode="none">
+            <text fg={compactPartColor(part, props.ctx.theme)} wrapMode="none">
               {part.text}
             </text>
           ))
         ) : (
-          <text fg={props.api.theme.current.textMuted} wrapMode="none">
+          <text fg={props.ctx.theme.text.muted} wrapMode="none">
             {mutedText()}
           </text>
         )}
@@ -317,12 +302,12 @@ function CompactStatusLine(props: {
   );
 }
 
-function GitLine(props: { api: TuiPluginApi; git: () => GitState }) {
+function GitLine(props: { ctx: Ctx; git: () => GitState }) {
   const segments = () => {
     const state = props.git();
     if (state.status !== "ready") return [];
 
-    const fg = state.dirty ? props.api.theme.current.warning : props.api.theme.current.success;
+    const fg = feedback(props.ctx.theme, state.dirty ? "warning" : "success");
     const symbol = state.dirty ? "●" : "✓";
     return [
       { text: "⎇", fg },
@@ -345,15 +330,19 @@ function GitLine(props: { api: TuiPluginApi; git: () => GitState }) {
 }
 
 function StatusLine(props: {
-  api: TuiPluginApi;
-  compact: () => CompactState;
+  ctx: Ctx;
+  quota: QuotaState;
   git: () => GitState;
   sessionID?: string;
 }) {
+  createEffect(() => {
+    void props.quota.resolveSession(props.sessionID);
+  });
+
   const visible = () => {
     if (props.git().status === "ready") return true;
 
-    const state = props.compact();
+    const state = props.quota.state();
     if (state.status === "ready") return state.line.text.length > 0;
     return state.status === "loading" || state.status === "unavailable";
   };
@@ -365,112 +354,49 @@ function StatusLine(props: {
         justifyContent={props.git().status === "ready" ? "space-between" : "flex-end"}
         width="100%"
       >
-        <GitLine api={props.api} git={props.git} />
-        <CompactStatusLine api={props.api} state={props.compact} sessionID={props.sessionID} />
+        <GitLine ctx={props.ctx} git={props.git} />
+        <CompactStatusLine ctx={props.ctx} state={props.quota.state} sessionID={props.sessionID} />
       </box>
     </Show>
   );
 }
 
-function SessionPromptWithStatus(props: {
-  api: TuiPluginApi;
-  sessionID: string;
-  quota: QuotaStateHandle;
-  git: () => GitState;
-  visible?: boolean;
-  disabled?: boolean;
-  onSubmit?: () => void;
-  promptRef?: TuiPromptRefCallback;
-}) {
-  createEffect(() => {
-    void props.quota.resolveSession(props.sessionID);
-  });
-
-  return (
-    <box gap={0} width="100%">
-      <props.api.ui.Prompt
-        sessionID={props.sessionID}
-        visible={props.visible}
-        disabled={props.disabled}
-        onSubmit={props.onSubmit}
-        ref={props.promptRef}
-      />
-      <StatusLine api={props.api} compact={props.quota.state} git={props.git} sessionID={props.sessionID} />
-    </box>
-  );
-}
-
-const gitStates = new WeakMap<TuiPluginApi, () => GitState>();
-
-function setupGitState(api: TuiPluginApi): () => GitState {
+function setupGitState(ctx: Ctx): { state: () => GitState; dispose: () => void } {
   const [state, setState] = createSignal<GitState>({ status: "no-repo" });
-  gitStates.set(api, state);
-
-  const worktree = api.state.path.worktree;
-  const directory = api.state.path.directory;
-  const gitRoot =
-    worktree && worktree !== "/"
-      ? worktree
-      : directory && directory !== "/"
-        ? directory
-        : undefined;
-
-  // `api.state.vcs` is undefined outside a repository. Without this guard the
-  // watcher was created for every non-git directory too — the home directory
-  // among them — and spawned a failing `git status` on every file event.
-  if (gitRoot && api.state.vcs) {
-    const watcher = createGitStatusWatcher({
-      worktree: gitRoot,
-      subscribe: (type, handler) => api.event.on(type as never, handler),
-      onState: setState,
-    });
-    api.lifecycle.onDispose(watcher.dispose);
-  }
-
-  return state;
-}
-
-function registerStableTuiSlots(api: TuiPluginApi, git: () => GitState): void {
-  const quota = getQuotaState(api);
-
-  api.slots.register({
-    order: COMPACT_ORDER,
-    slots: {
-      session_prompt(
-        _ctx,
-        props: {
-          session_id: string;
-          visible?: boolean;
-          disabled?: boolean;
-          on_submit?: () => void;
-          ref?: TuiPromptRefCallback;
-        },
-      ) {
-        return (
-          <SessionPromptWithStatus
-            api={api}
-            sessionID={props.session_id}
-            quota={quota}
-            git={git}
-            visible={props.visible}
-            disabled={props.disabled}
-            onSubmit={props.on_submit}
-            promptRef={props.ref}
-          />
-        );
-      },
+  const location = ctx.location;
+  const source = createGitSource({
+    info: () => ctx.data.location.vcs.info(location),
+    syncInfo: () => ctx.data.location.vcs.sync(location),
+    changedFiles: async () => {
+      const result = await ctx.client.vcs.status(location ? { location: { directory: location.directory } } : undefined);
+      return result.data.length;
     },
+    subscribe: (type, handler) => ctx.data.on(type as never, handler),
+    onState: setState,
   });
+  return { state, dispose: source.dispose };
 }
 
-const tui: TuiPlugin = async (api) => {
-  const git = setupGitState(api);
-  registerStableTuiSlots(api, git);
-};
-
-const pluginModule: TuiPluginModule & { id: string } = {
+export default Plugin.define({
   id,
-  tui,
-};
+  setup: (ctx) => {
+    const git = setupGitState(ctx);
+    const quota = createQuotaState(ctx);
 
-export default pluginModule;
+    // A line of its own under the prompt footer: the footer's status slot keeps
+    // the host's spinner and interrupt feedback, and the prompt itself is left
+    // alone — the V1 HUD had to take over and re-render it.
+    const unclaim = ctx.ui.slot({
+      after: "prompt.footer",
+      render: (input) => (
+        <StatusLine ctx={ctx} quota={quota} git={git.state} sessionID={input.sessionID} />
+      ),
+    });
+
+    return () => {
+      unclaim();
+      quota.dispose();
+      git.dispose();
+    };
+  },
+});
