@@ -2,6 +2,7 @@
 
 import { Plugin } from "@opencode/plugin/tui";
 import type { RGBA } from "@opentui/core";
+import { useTerminalDimensions } from "@opentui/solid";
 import { createEffect, createMemo, createSignal, Show } from "solid-js";
 import type { Provider, SessionModelMeta } from "./providers/types.js";
 import { antigravityProvider } from "./providers/antigravity/index.js";
@@ -322,24 +323,46 @@ function StatusLine(props: {
     return state.status === "loading" || state.status === "unavailable";
   };
 
+  const dimensions = useTerminalDimensions();
+  // The session view pads its content by 1 or 2 columns, by terminal width; the
+  // same padding lines the quota up under the footer's path.
+  const gutter = () => (dimensions().width < 44 ? 1 : 2);
+
+  // Left-aligned: this line spans the whole app width, sidebar included, and
+  // whether the sidebar shows is internal to the session view. Starting under
+  // the footer's path keeps the quota in the main column either way.
   return (
     <Show when={visible()}>
-      {/* A blank row below. A symmetric half-row gap would mean drawing a piece
-          of the prompt's border, whose colour follows opencode's internal state
-          (draft agent, shell mode, muted prompt); a blank row fits any surface
-          under this slot (prompt, question form, permission). */}
-      <box flexDirection="column" width="100%" flexShrink={0} paddingBottom={1}>
-        <box
-          flexDirection="row"
-          justifyContent="flex-end"
-          width="100%"
-          // Lines the text up with the prompt's, which starts after its "┃ " border.
-          paddingLeft={2}
-          paddingRight={1}
-        >
-          <CompactStatusLine ctx={props.ctx} state={props.quota.state} sessionID={props.sessionID} />
-        </box>
+      <box
+        flexDirection="row"
+        justifyContent="flex-start"
+        width="100%"
+        flexShrink={0}
+        // The session view ends with an empty padding row (paddingBottom 1):
+        // move up onto it, so the line sits right under the prompt footer.
+        // Only drawn inside a session, where that row always exists.
+        marginTop={-1}
+        paddingLeft={gutter()}
+        paddingRight={gutter()}
+      >
+        <CompactStatusLine ctx={props.ctx} state={props.quota.state} sessionID={props.sessionID} />
       </box>
+    </Show>
+  );
+}
+
+/**
+ * The `app` slot is global: it renders under every route. The HUD only has
+ * something to say inside a session, so it follows the router.
+ */
+function AppLine(props: { ctx: Ctx; quota: QuotaState }) {
+  const sessionID = () => {
+    const route = props.ctx.ui.router.current();
+    return route.type === "session" ? route.sessionID : undefined;
+  };
+  return (
+    <Show when={sessionID()}>
+      {(id: () => string) => <StatusLine ctx={props.ctx} quota={props.quota} sessionID={id()} />}
     </Show>
   );
 }
@@ -349,16 +372,15 @@ export default Plugin.define({
   setup: (ctx) => {
     const quota = createQuotaState(ctx);
 
-    // A line of its own just above the prompt. The prompt.footer slots all sit
-    // inside the footer's single row: anything placed there shares that row
-    // and squeezes the host's status ("esc interrupt"), token count and
-    // shortcuts. Nothing below the prompt accepts a line, so the HUD sits on
-    // top of the composer, and the prompt and its footer are left untouched.
+    // A line of its own at the very bottom, under opencode's prompt footer.
+    // The prompt.footer slots all sit inside the footer's single row: anything
+    // placed there shares it and squeezes the host's status ("esc interrupt").
+    // The `app` slot comes after the whole route area in the app's column, so
+    // a line there lands below everything, and the space above the prompt is
+    // left to other plugins (opencode-todos).
     const unclaim = ctx.ui.slot({
-      append: "session.composer.top",
-      render: (input) => (
-        <StatusLine ctx={ctx} quota={quota} sessionID={input.sessionID} />
-      ),
+      append: "app",
+      render: () => <AppLine ctx={ctx} quota={quota} />,
     });
 
     return () => {
