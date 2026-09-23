@@ -2,7 +2,7 @@
 
 import { Plugin } from "@opencode/plugin/tui";
 import type { RGBA } from "@opentui/core";
-import { createEffect, createMemo, createRoot, createSignal, on, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, Show } from "solid-js";
 import type { Provider, SessionModelMeta } from "./providers/types.js";
 import { antigravityProvider } from "./providers/antigravity/index.js";
 import { opencodeGoProvider } from "./providers/opencode-go/index.js";
@@ -19,8 +19,6 @@ import {
   type CompactLine,
   type CompactPart,
 } from "./hud/compact.js";
-import type { GitState } from "./hud/git.js";
-import { createGitSource } from "./hud/git.js";
 
 type Ctx = Plugin.Context;
 type Theme = Ctx["theme"];
@@ -307,37 +305,9 @@ function CompactStatusLine(props: { ctx: Ctx; state: () => CompactState; session
   );
 }
 
-function GitLine(props: { ctx: Ctx; git: () => GitState }) {
-  const segments = () => {
-    const state = props.git();
-    if (state.status !== "ready") return [];
-
-    const fg = feedback(props.ctx.theme, state.dirty ? "warning" : "success");
-    const symbol = state.dirty ? "●" : "✓";
-    return [
-      { text: "⎇", fg },
-      { text: `  ${state.branch}`, fg },
-      { text: ` ${symbol}`, fg },
-    ];
-  };
-
-  return (
-    <Show when={segments().length > 0}>
-      <box flexDirection="row">
-        {segments().map((segment) => (
-          <text fg={segment.fg} wrapMode="none">
-            {segment.text}
-          </text>
-        ))}
-      </box>
-    </Show>
-  );
-}
-
 function StatusLine(props: {
   ctx: Ctx;
   quota: QuotaState;
-  git: () => GitState;
   sessionID?: string;
 }) {
   createEffect(() => {
@@ -345,7 +315,6 @@ function StatusLine(props: {
   });
 
   const visible = () => {
-    if (props.git().status === "ready") return true;
     if (sessionCachePart(props.ctx, props.sessionID)) return true;
 
     const state = props.quota.state();
@@ -355,71 +324,46 @@ function StatusLine(props: {
 
   return (
     <Show when={visible()}>
-      <box
-        flexDirection="row"
-        justifyContent={props.git().status === "ready" ? "space-between" : "flex-end"}
-        width="100%"
-      >
-        <GitLine ctx={props.ctx} git={props.git} />
-        <CompactStatusLine ctx={props.ctx} state={props.quota.state} sessionID={props.sessionID} />
+      {/* A blank row below. A symmetric half-row gap would mean drawing a piece
+          of the prompt's border, whose colour follows opencode's internal state
+          (draft agent, shell mode, muted prompt); a blank row fits any surface
+          under this slot (prompt, question form, permission). */}
+      <box flexDirection="column" width="100%" flexShrink={0} paddingBottom={1}>
+        <box
+          flexDirection="row"
+          justifyContent="flex-end"
+          width="100%"
+          // Lines the text up with the prompt's, which starts after its "┃ " border.
+          paddingLeft={2}
+          paddingRight={1}
+        >
+          <CompactStatusLine ctx={props.ctx} state={props.quota.state} sessionID={props.sessionID} />
+        </box>
       </box>
     </Show>
   );
 }
 
-function setupGitState(ctx: Ctx): { state: () => GitState; dispose: () => void } {
-  const [state, setState] = createSignal<GitState>({ status: "no-repo" });
-  // ctx.location follows the user's location switches, so it is read on every
-  // refresh rather than captured once at setup.
-  const ref = () => {
-    const current = ctx.location;
-    return current ? { directory: current.directory, workspaceID: current.workspaceID } : undefined;
-  };
-  const source = createGitSource({
-    info: () => ctx.data.location.vcs.info(ref()),
-    syncInfo: () => ctx.data.location.vcs.sync(ref()),
-    changedFiles: async () => {
-      const location = ref();
-      const result = await ctx.client.vcs.status(location ? { location } : undefined);
-      return result.data.length;
-    },
-    subscribe: (type, handler) => ctx.data.on(type, handler),
-    onState: setState,
-  });
-  // A location switch fires none of the refresh events: follow it explicitly.
-  const stopFollowing = createRoot((dispose) => {
-    createEffect(on(() => ctx.location?.directory, () => source.refresh(), { defer: true }));
-    return dispose;
-  });
-  return {
-    state,
-    dispose: () => {
-      stopFollowing();
-      source.dispose();
-    },
-  };
-}
-
 export default Plugin.define({
   id,
   setup: (ctx) => {
-    const git = setupGitState(ctx);
     const quota = createQuotaState(ctx);
 
-    // A line of its own under the prompt footer: the footer's status slot keeps
-    // the host's spinner and interrupt feedback, and the prompt itself is left
-    // alone — the V1 HUD had to take over and re-render it.
+    // A line of its own just above the prompt. The prompt.footer slots all sit
+    // inside the footer's single row: anything placed there shares that row
+    // and squeezes the host's status ("esc interrupt"), token count and
+    // shortcuts. Nothing below the prompt accepts a line, so the HUD sits on
+    // top of the composer, and the prompt and its footer are left untouched.
     const unclaim = ctx.ui.slot({
-      after: "prompt.footer",
+      append: "session.composer.top",
       render: (input) => (
-        <StatusLine ctx={ctx} quota={quota} git={git.state} sessionID={input.sessionID} />
+        <StatusLine ctx={ctx} quota={quota} sessionID={input.sessionID} />
       ),
     });
 
     return () => {
       unclaim();
       quota.dispose();
-      git.dispose();
     };
   },
 });

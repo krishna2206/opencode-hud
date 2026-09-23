@@ -27,7 +27,7 @@
       "default": "./dist/tui.js"
     }
   },
-  "description": "OpenCode HUD minimal: compact quota status line + git branch in the TUI.",
+  "description": "OpenCode HUD minimal: model quota and live prompt-cache stats above the prompt.",
   "engines": {
     "node": ">=22.0.0"
   },
