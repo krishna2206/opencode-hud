@@ -10,10 +10,10 @@
  * their result). If the collect yields no usable entries, the renderer keeps
  * the last known state (no flicker between a value and "unavailable").
  *
- * Scheduling policy: a burst of events must not create a burst of timers. The
- * TUI receives hundreds of `message.updated` events while a response streams,
- * and each one used to arm one timer per configured delay. Timers are now keyed
- * by delay, so an arbitrarily long burst arms at most one timer per delay.
+ * Scheduling policy: a burst of events must not create a burst of timers. A
+ * long agentic run emits one usage event per step, and each one would arm one
+ * timer per configured delay. Timers are keyed by delay, so an arbitrarily long
+ * burst arms at most one timer per delay.
  */
 
 export interface RefreshLifecycle {

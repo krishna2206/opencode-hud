@@ -1,10 +1,9 @@
 /**
  * Leading-edge throttle.
  *
- * Used for `message.updated`, which fires continuously while a response
- * streams. Quota does not change token by token, so collapsing the burst into
- * one call per window is not a degradation — it is what the event should have
- * meant. Accuracy at the end of a turn is guaranteed separately by
+ * Used for `session.usage.updated`, which fires after every step of a long
+ * agentic run. Quota does not need that granularity, so collapsing the burst
+ * into one call per window is not a degradation. Accuracy at the end of a turn is guaranteed separately by
  * `session.idle`, which is why no trailing call is needed here.
  *
  * The clock is injectable so tests do not have to wait in real time.

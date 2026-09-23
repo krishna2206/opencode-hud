@@ -11,7 +11,6 @@
 import type { CollectResult } from "../refresh/collect.js";
 import { sanitizeText } from "./text.js";
 
-export const COMPACT_PERCENT_DISPLAY_MODE = "used" as const;
 export const COMPACT_MAX_WIDTH = 96;
 export const COMPACT_UNAVAILABLE_TEXT = "Quota unavailable";
 export const COMPACT_LOADING_TEXT = "Quota loading…";

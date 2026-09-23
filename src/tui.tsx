@@ -30,9 +30,9 @@ const id = "opencode-hud";
 const REFRESH_INTERVAL_MS = 60_000;
 const EVENT_REFRESH_DELAYS_MS = [150, 600] as const;
 /**
- * `message.updated` fires continuously while a response streams. Quota does not
- * move token by token, so it is collapsed to one refresh per window; the exact
- * value after a turn comes from `session.idle`.
+ * `session.usage.updated` fires after every step of a long agentic run. Quota
+ * does not need that granularity, so it is collapsed to one refresh per window;
+ * the exact value after a turn comes from `session.idle`.
  */
 const STREAMING_REFRESH_THROTTLE_MS = 30_000;
 const MOUNT_RECOVERY_DELAYS_MS = [500, 1_500, 4_000] as const;
@@ -161,16 +161,19 @@ function createQuotaState(ctx: Ctx): QuotaState {
         "session.usage.updated",
         throttleLeading(() => scheduleRefresh(), STREAMING_REFRESH_THROTTLE_MS),
       ),
-      // A model switch can change which quota applies.
-      ctx.data.on("session.model.selected", () => {
+      // A model switch can change which quota applies. The event carries the
+      // new model, which the session record may not reflect yet; other
+      // sessions' switches are ignored.
+      ctx.data.on("session.model.selected", (event) => {
+        if (event.data.sessionID !== currentSession) return;
         resolvedFor = undefined;
-        void resolve(currentSession);
+        void resolve(currentSession, extractSessionModelMeta(event.data));
       }),
     ],
   });
 
   let currentSession: string | undefined;
-  const resolve = async (sessionID: string | undefined) => {
+  const resolve = async (sessionID: string | undefined, known?: SessionModelMeta) => {
     currentSession = sessionID;
     if (sessionID === resolvedFor) return;
     resolvedFor = sessionID;
@@ -181,7 +184,7 @@ function createQuotaState(ctx: Ctx): QuotaState {
       return;
     }
 
-    const meta = await getSessionModelMeta(ctx, sessionID);
+    const meta = known ?? (await getSessionModelMeta(ctx, sessionID));
     if (version !== resolveVersion) return;
 
     const ids = PROVIDERS.filter((provider) => provider.matchesModel(meta)).map(

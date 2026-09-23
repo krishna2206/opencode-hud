@@ -9,10 +9,8 @@
 import type { Provider, ProviderContext, ProviderResult, QuotaEntry, QuotaError } from "../providers/types.js";
 
 export interface CollectResult {
-  attempted: boolean;
   entries: QuotaEntry[];
   errors: QuotaError[];
-  providerCount: number;
 }
 
 export async function collectQuota(
@@ -31,10 +29,5 @@ export async function collectQuota(
     errors.push(...result.errors);
   }
 
-  return {
-    attempted: results.some((result) => result.attempted),
-    entries,
-    errors,
-    providerCount: providers.length,
-  };
+  return { entries, errors };
 }
