@@ -31,7 +31,7 @@ export interface GitSourceOptions {
   /** Number of files the server reports as changed. */
   readonly changedFiles: () => Promise<number>;
   /** Subscribes to a server event and returns the unsubscribe function. */
-  readonly subscribe: (type: string, handler: () => void) => () => void;
+  readonly subscribe: (type: GitRefreshEvent, handler: () => void) => () => void;
   readonly onState: (state: GitState) => void;
   /** Safety net only: filesystem.changed already covers edits made outside opencode. */
   readonly pollMs?: number;
@@ -48,8 +48,9 @@ const DEFAULT_DEBOUNCE_MS = 400;
  * one `vcs.status` call.
  */
 export const GIT_REFRESH_EVENTS = ["vcs.branch.updated", "filesystem.changed", "session.idle"] as const;
+export type GitRefreshEvent = (typeof GIT_REFRESH_EVENTS)[number];
 
-export function createGitSource(options: GitSourceOptions): { dispose: () => void } {
+export function createGitSource(options: GitSourceOptions): { refresh: () => void; dispose: () => void } {
   let disposed = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let running: Promise<void> | undefined;
@@ -89,6 +90,8 @@ export function createGitSource(options: GitSourceOptions): { dispose: () => voi
   void refresh();
 
   return {
+    /** Re-reads the state now, e.g. after the active location changed. */
+    refresh: schedule,
     dispose() {
       disposed = true;
       if (timer) clearTimeout(timer);

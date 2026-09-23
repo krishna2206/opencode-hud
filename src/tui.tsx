@@ -2,7 +2,7 @@
 
 import { Plugin } from "@opencode/plugin/tui";
 import type { RGBA } from "@opentui/core";
-import { createEffect, createSignal, Show } from "solid-js";
+import { createEffect, createMemo, createRoot, createSignal, on, Show } from "solid-js";
 import type { Provider, SessionModelMeta } from "./providers/types.js";
 import { antigravityProvider } from "./providers/antigravity/index.js";
 import { opencodeGoProvider } from "./providers/opencode-go/index.js";
@@ -246,35 +246,37 @@ function compactPartColor(part: CompactPart, theme: Theme): RGBA | undefined {
   return theme.text.muted;
 }
 
+/** The live prompt-cache part for a session, whatever the quota provider knows. */
+function sessionCachePart(ctx: Ctx, sessionID: string | undefined): CompactPart | undefined {
+  if (!sessionID) return undefined;
+  try {
+    const cachePart = lastStepCachePart(ctx, sessionID);
+    if (!cachePart) return undefined;
+    return {
+      kind: "cache",
+      text: cachePart.text,
+      hitRatio: cachePart.hitRatio,
+      cachedTokens: cachePart.cachedTokens,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 function CompactStatusLine(props: { ctx: Ctx; state: () => CompactState; sessionID?: string }) {
-  const parts = () => {
+  const cache = createMemo(() => sessionCachePart(props.ctx, props.sessionID));
+
+  // Quota parts when the provider has them, then the live prompt-cache stats of
+  // the last assistant step. The cache part stands on its own: models with no
+  // quota provider still show it.
+  const parts = createMemo((): CompactPart[] => {
     const state = props.state();
-    if (state.status !== "ready") return [];
-
-    const baseParts = [...state.line.parts];
-
-    // Live prompt-cache stats from the last assistant step (rendered if cache hit > 0%)
-    if (props.sessionID) {
-      try {
-        const cachePart = lastStepCachePart(props.ctx, props.sessionID);
-        if (cachePart) {
-          baseParts.push(
-            { kind: "separator", text: " · " },
-            {
-              kind: "cache",
-              text: cachePart.text,
-              hitRatio: cachePart.hitRatio,
-              cachedTokens: cachePart.cachedTokens,
-            },
-          );
-        }
-      } catch {
-        // ignore
-      }
-    }
-
-    return baseParts;
-  };
+    const quotaParts = state.status === "ready" ? [...state.line.parts] : [];
+    const cachePart = cache();
+    if (!cachePart) return quotaParts;
+    if (quotaParts.length === 0) return [cachePart];
+    return [...quotaParts, { kind: "separator", text: " · " }, cachePart];
+  });
 
   const mutedText = () => {
     const state = props.state();
@@ -341,6 +343,7 @@ function StatusLine(props: {
 
   const visible = () => {
     if (props.git().status === "ready") return true;
+    if (sessionCachePart(props.ctx, props.sessionID)) return true;
 
     const state = props.quota.state();
     if (state.status === "ready") return state.line.text.length > 0;
@@ -363,18 +366,35 @@ function StatusLine(props: {
 
 function setupGitState(ctx: Ctx): { state: () => GitState; dispose: () => void } {
   const [state, setState] = createSignal<GitState>({ status: "no-repo" });
-  const location = ctx.location;
+  // ctx.location follows the user's location switches, so it is read on every
+  // refresh rather than captured once at setup.
+  const ref = () => {
+    const current = ctx.location;
+    return current ? { directory: current.directory, workspaceID: current.workspaceID } : undefined;
+  };
   const source = createGitSource({
-    info: () => ctx.data.location.vcs.info(location),
-    syncInfo: () => ctx.data.location.vcs.sync(location),
+    info: () => ctx.data.location.vcs.info(ref()),
+    syncInfo: () => ctx.data.location.vcs.sync(ref()),
     changedFiles: async () => {
-      const result = await ctx.client.vcs.status(location ? { location: { directory: location.directory } } : undefined);
+      const location = ref();
+      const result = await ctx.client.vcs.status(location ? { location } : undefined);
       return result.data.length;
     },
-    subscribe: (type, handler) => ctx.data.on(type as never, handler),
+    subscribe: (type, handler) => ctx.data.on(type, handler),
     onState: setState,
   });
-  return { state, dispose: source.dispose };
+  // A location switch fires none of the refresh events: follow it explicitly.
+  const stopFollowing = createRoot((dispose) => {
+    createEffect(on(() => ctx.location?.directory, () => source.refresh(), { defer: true }));
+    return dispose;
+  });
+  return {
+    state,
+    dispose: () => {
+      stopFollowing();
+      source.dispose();
+    },
+  };
 }
 
 export default Plugin.define({

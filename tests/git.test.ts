@@ -98,6 +98,16 @@ describe("createGitSource", () => {
     h.source.dispose();
   });
 
+  it("re-reads the state on demand, as after a location switch", async () => {
+    const h = harness({ changed: 0 });
+    await sleep(10);
+    h.setChanged(4);
+    h.source.refresh();
+    await sleep(20);
+    expect(h.states.at(-1)).toEqual({ status: "ready", branch: "main", dirty: true });
+    h.source.dispose();
+  });
+
   it("unsubscribes and stays quiet after dispose", async () => {
     const h = harness();
     await sleep(10);
