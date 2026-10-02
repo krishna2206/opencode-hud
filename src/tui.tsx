@@ -9,6 +9,7 @@ import { antigravityProvider } from "./providers/antigravity/index.js";
 import { opencodeGoProvider } from "./providers/opencode-go/index.js";
 import { claudeCodeProvider } from "./providers/claude-code/index.js";
 import { codexProvider } from "./providers/codex/index.js";
+import { commandCodeProvider } from "./providers/commandcode/index.js";
 import { collectQuota, type CollectResult } from "./refresh/collect.js";
 import { createRefreshLifecycle } from "./refresh/lifecycle.js";
 import { throttleLeading } from "./refresh/throttle.js";
@@ -45,6 +46,7 @@ const PROVIDERS: readonly Provider[] = [
   opencodeGoProvider,
   claudeCodeProvider,
   codexProvider,
+  commandCodeProvider,
 ];
 
 type CompactState =
