@@ -10,6 +10,7 @@ import { opencodeGoProvider } from "./providers/opencode-go/index.js";
 import { claudeCodeProvider } from "./providers/claude-code/index.js";
 import { codexProvider } from "./providers/codex/index.js";
 import { commandCodeProvider } from "./providers/commandcode/index.js";
+import { zedProvider } from "./providers/zed/index.js";
 import { collectQuota, type CollectResult } from "./refresh/collect.js";
 import { createRefreshLifecycle } from "./refresh/lifecycle.js";
 import { throttleLeading } from "./refresh/throttle.js";
@@ -40,6 +41,9 @@ const REQUEST_TIMEOUT_MS = 5_000;
 
 const COMPACT_PERCENT_WARNING_THRESHOLD = 50;
 const COMPACT_PERCENT_ERROR_THRESHOLD = 20;
+/** Pay-per-token spend turns yellow at 80% of the allowance, red at 95%. */
+const COMPACT_SPEND_WARNING_RATIO = 0.8;
+const COMPACT_SPEND_ERROR_RATIO = 0.95;
 
 const PROVIDERS: readonly Provider[] = [
   antigravityProvider,
@@ -47,6 +51,7 @@ const PROVIDERS: readonly Provider[] = [
   claudeCodeProvider,
   codexProvider,
   commandCodeProvider,
+  zedProvider,
 ];
 
 type CompactState =
@@ -239,6 +244,12 @@ function compactPartColor(part: CompactPart, theme: Theme): RGBA | undefined {
       if (remaining >= COMPACT_PERCENT_ERROR_THRESHOLD) return feedback(theme, "warning");
       return feedback(theme, "error");
     }
+  }
+
+  if (part.kind === "spend") {
+    if (part.usedRatio >= COMPACT_SPEND_ERROR_RATIO) return feedback(theme, "error");
+    if (part.usedRatio >= COMPACT_SPEND_WARNING_RATIO) return feedback(theme, "warning");
+    return feedback(theme, "success");
   }
 
   if (part.kind === "cache") {

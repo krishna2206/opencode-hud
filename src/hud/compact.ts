@@ -19,6 +19,7 @@ export type CompactPart =
   | { kind: "label"; text: string }
   | { kind: "separator"; text: string }
   | { kind: "percent"; text: string; percentRemaining: number }
+  | { kind: "spend"; text: string; usedRatio: number }
   | { kind: "cache"; text: string; hitRatio: number; cachedTokens: number }
   | { kind: "error"; text: string };
 
@@ -78,7 +79,7 @@ function buildPercentGroups(entries: CollectResult["entries"]): { groups: Map<st
   const order: string[] = [];
 
   for (const entry of entries) {
-    if (entry.kind === "value") continue;
+    if (entry.kind === "value" || entry.kind === "spend") continue;
 
     const provider = providerName((entry.group?.trim() && entry.group) || entry.name);
     const key = provider.toLowerCase();
@@ -98,6 +99,26 @@ function buildPercentGroups(entries: CollectResult["entries"]): { groups: Map<st
   }
 
   return { groups, order };
+}
+
+export function formatUsd(amount: number): string {
+  return `$${Math.max(0, amount).toFixed(2)}`;
+}
+
+/** "Zed · $2.45 / $10.00": pay-per-token spend, coloured by how much of the allowance is used. */
+function formatSpendParts(entries: CollectResult["entries"]): CompactPart[][] {
+  const out: CompactPart[][] = [];
+  for (const entry of entries) {
+    if (entry.kind !== "spend") continue;
+    const provider = providerName((entry.group?.trim() && entry.group) || entry.name);
+    const allowance = entry.allowanceUsd ?? 0;
+    const text = allowance > 0 ? `${formatUsd(entry.usedUsd)} / ${formatUsd(allowance)}` : formatUsd(entry.usedUsd);
+    out.push([
+      { kind: "label", text: `${compactText(provider)}${WINDOW_SEPARATOR}` },
+      { kind: "spend", text, usedRatio: allowance > 0 ? entry.usedUsd / allowance : 0 },
+    ]);
+  }
+  return out;
 }
 
 function formatGroupParts(group: PercentGroup): CompactPart[] {
@@ -158,10 +179,10 @@ export interface CompactLine {
 export function buildCompactLine(result: CollectResult): CompactLine {
   const { groups, order } = buildPercentGroups(result.entries);
 
-  const groupParts = order
-    .map((key) => groups.get(key)!)
-    .map(formatGroupParts)
-    .filter((parts) => parts.length > 0);
+  const groupParts = [
+    ...order.map((key) => groups.get(key)!).map(formatGroupParts),
+    ...formatSpendParts(result.entries),
+  ].filter((parts) => parts.length > 0);
 
   const segments = groupParts
     .map((parts) => joinParts(parts))

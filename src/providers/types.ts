@@ -26,6 +26,18 @@ export type QuotaEntry =
       group?: string;
       value: string;
       resetTimeIso?: string;
+    }
+  | {
+      /**
+       * Pay-per-token usage in USD (no windows, no percentage): shown as "<group> · $used / $allowance".
+       * `allowanceUsd` is omitted when the plan has no fixed allowance.
+       */
+      kind: "spend";
+      name: string;
+      group?: string;
+      usedUsd: number;
+      allowanceUsd?: number;
+      resetTimeIso?: string;
     };
 
 export interface QuotaError {
