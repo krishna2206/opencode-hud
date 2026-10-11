@@ -11,6 +11,7 @@ import { claudeCodeProvider } from "./providers/claude-code/index.js";
 import { codexProvider } from "./providers/codex/index.js";
 import { commandCodeProvider } from "./providers/commandcode/index.js";
 import { zedProvider } from "./providers/zed/index.js";
+import { puterProvider } from "./providers/puter/index.js";
 import { collectQuota, type CollectResult } from "./refresh/collect.js";
 import { createRefreshLifecycle } from "./refresh/lifecycle.js";
 import { throttleLeading } from "./refresh/throttle.js";
@@ -52,6 +53,7 @@ const PROVIDERS: readonly Provider[] = [
   codexProvider,
   commandCodeProvider,
   zedProvider,
+  puterProvider,
 ];
 
 type CompactState =
@@ -250,6 +252,12 @@ function compactPartColor(part: CompactPart, theme: Theme): RGBA | undefined {
     if (part.usedRatio >= COMPACT_SPEND_ERROR_RATIO) return feedback(theme, "error");
     if (part.usedRatio >= COMPACT_SPEND_WARNING_RATIO) return feedback(theme, "warning");
     return feedback(theme, "success");
+  }
+
+  if (part.kind === "credits") {
+    if (part.remainingRatio >= 0.5) return feedback(theme, "success");
+    if (part.remainingRatio >= 0.2) return feedback(theme, "warning");
+    return feedback(theme, "error");
   }
 
   if (part.kind === "cache") {

@@ -3,6 +3,8 @@ import { buildCompactLine, formatUsd } from "../src/hud/compact.js";
 import { zedProvider } from "../src/providers/zed/index.js";
 import { buildZedEntries } from "../src/providers/zed/parse.js";
 import { resolveZedProxyPort } from "../src/providers/zed/fetch.js";
+import { puterProvider } from "../src/providers/puter/index.js";
+import { buildPuterEntries } from "../src/providers/puter/parse.js";
 
 const quota = (used: number, allowance: number) => ({
   status: "ok" as const,
@@ -119,5 +121,41 @@ describe("Zed provider - compact line", () => {
   it("formats USD with two decimals and never negative", () => {
     expect(formatUsd(10)).toBe("$10.00");
     expect(formatUsd(-1)).toBe("$0.00");
+  });
+});
+
+describe("Puter provider", () => {
+  const quota = {
+    status: "ok" as const,
+    credits: { unit: "credits", monthlyAllowance: 1000, remaining: 695.4, used: 304.6, usedPercent: 30.46, resetsAt: "2026-11-01T00:00:00.000Z" },
+  };
+
+  it("matches Puter models only", () => {
+    expect(puterProvider.matchesModel({ providerID: "puter" })).toBe(true);
+    expect(puterProvider.matchesModel({ modelID: "puter/gpt-6-luna" })).toBe(true);
+    expect(puterProvider.matchesModel({ providerID: "zed-proxy" })).toBe(false);
+    expect(puterProvider.matchesModel({})).toBe(false);
+  });
+
+  it("maps monthly remaining credits to a compact quota entry", () => {
+    expect(buildPuterEntries(quota)).toEqual([{
+      kind: "credits", name: "Puter", group: "Puter", remaining: 695.4, allowance: 1000, resetTimeIso: "2026-11-01T00:00:00.000Z",
+    }]);
+    expect(buildCompactLine({ entries: buildPuterEntries(quota), errors: [] }).text).toBe("Puter · 695 / 1000 cr");
+  });
+
+  it("loads the local quota endpoint", async () => {
+    const server = Bun.serve({ port: 0, fetch: () => Response.json(quota) });
+    const previous = process.env.PUTER_PROXY_PORT;
+    process.env.PUTER_PROXY_PORT = String(server.port);
+    try {
+      const result = await puterProvider.load({ requestTimeoutMs: 2000 } as any);
+      expect(result.errors).toEqual([]);
+      expect(result.entries).toEqual(buildPuterEntries(quota));
+    } finally {
+      server.stop(true);
+      if (previous === undefined) delete process.env.PUTER_PROXY_PORT;
+      else process.env.PUTER_PROXY_PORT = previous;
+    }
   });
 });

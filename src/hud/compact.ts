@@ -20,6 +20,7 @@ export type CompactPart =
   | { kind: "separator"; text: string }
   | { kind: "percent"; text: string; percentRemaining: number }
   | { kind: "spend"; text: string; usedRatio: number }
+  | { kind: "credits"; text: string; remainingRatio: number }
   | { kind: "cache"; text: string; hitRatio: number; cachedTokens: number }
   | { kind: "error"; text: string };
 
@@ -79,7 +80,7 @@ function buildPercentGroups(entries: CollectResult["entries"]): { groups: Map<st
   const order: string[] = [];
 
   for (const entry of entries) {
-    if (entry.kind === "value" || entry.kind === "spend") continue;
+    if (entry.kind === "value" || entry.kind === "spend" || entry.kind === "credits") continue;
 
     const provider = providerName((entry.group?.trim() && entry.group) || entry.name);
     const key = provider.toLowerCase();
@@ -119,6 +120,17 @@ function formatSpendParts(entries: CollectResult["entries"]): CompactPart[][] {
     ]);
   }
   return out;
+}
+
+function formatCreditParts(entries: CollectResult["entries"]): CompactPart[][] {
+  return entries.filter((entry) => entry.kind === "credits").map((entry) => {
+    const provider = providerName((entry.group?.trim() && entry.group) || entry.name);
+    const text = `${Math.max(0, entry.remaining).toFixed(0)} / ${Math.max(0, entry.allowance).toFixed(0)} cr`;
+    return [
+      { kind: "label", text: `${compactText(provider)}${WINDOW_SEPARATOR}` },
+      { kind: "credits", text, remainingRatio: entry.allowance > 0 ? entry.remaining / entry.allowance : 0 },
+    ];
+  });
 }
 
 function formatGroupParts(group: PercentGroup): CompactPart[] {
@@ -182,6 +194,7 @@ export function buildCompactLine(result: CollectResult): CompactLine {
   const groupParts = [
     ...order.map((key) => groups.get(key)!).map(formatGroupParts),
     ...formatSpendParts(result.entries),
+    ...formatCreditParts(result.entries),
   ].filter((parts) => parts.length > 0);
 
   const segments = groupParts

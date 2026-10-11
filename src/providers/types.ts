@@ -38,6 +38,15 @@ export type QuotaEntry =
       usedUsd: number;
       allowanceUsd?: number;
       resetTimeIso?: string;
+    }
+  | {
+      /** Monthly credits remaining, distinct from USD-denominated spend. */
+      kind: "credits";
+      name: string;
+      group?: string;
+      remaining: number;
+      allowance: number;
+      resetTimeIso?: string;
     };
 
 export interface QuotaError {
