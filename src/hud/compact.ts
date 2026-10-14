@@ -2,7 +2,7 @@
  * Compact status line formatter.
  *
  * Renders collected quota entries as one compact, colorizable line:
- *   "Antigravity · Gemini: 71% · Claude: 44%  |  OpenCode Go · 5h 71%"
+ *   "Antigravity · 5h 71% · 7d 44%  |  OpenCode Go · 5h 71%"
  *
  * Percentages are shown as "used" (100 - remaining), the current default.
  * Error entries surface only when nothing else is available.

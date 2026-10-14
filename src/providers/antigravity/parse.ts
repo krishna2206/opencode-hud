@@ -1,12 +1,10 @@
 /**
  * Antigravity: parse /api/status into quota entries.
  *
- * Aggregation is a health-weighted average across ALL accounts (not just the
- * best one): for each account the limiting bucket within the family is the
- * minimum of its weekly and 5h remaining fractions (a Starter account exposes
- * only weekly, which is then used directly). Accounts without health data fall
- * back to a simple average. The reported reset is the earliest future reset
- * among the contributing accounts.
+ * Emits separate 5h and weekly Gemini quota windows, health-weighted across
+ * accounts. Starter accounts have no 5h summary bucket: use their legacy
+ * per-model quota for the 5h entry only. Never synthesize a weekly value from
+ * the rolling quota fraction.
  */
 
 import type { QuotaEntry } from "../types.js";
@@ -14,24 +12,24 @@ import type { ProxyAccount, ProxyStatus } from "./fetch.js";
 
 export const ANTIGRAVITY_LABEL = "Antigravity";
 
-type Family = "gemini" | "claude";
+type Window = "5h" | "weekly";
 
-type FamilyScore = {
+interface ScoreCandidate {
+  health: number;
   fraction: number;
   resetTimeIso?: string;
-};
-
-function classifyFamily(name: string): Family | null {
-  const lower = name.toLowerCase();
-  if (lower.includes("gemini")) return "gemini";
-  if (lower.includes("claude") || lower.includes("anthropic") || lower.includes("gpt")) {
-    return "claude";
-  }
-  return null;
 }
 
 function isFiniteFraction(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+}
+
+// /api/status reports effectiveHealthScore on the proxy's 0–100 scale.
+function healthWeight(account: ProxyAccount): number {
+  const score = account.effectiveHealthScore;
+  return typeof score === "number" && Number.isFinite(score)
+    ? Math.max(0, Math.min(100, score)) / 100
+    : 1;
 }
 
 /**
@@ -55,59 +53,44 @@ function earliestFutureReset(candidates: Array<string | undefined>, now: number)
   return closest;
 }
 
-interface ScoreCandidate {
-  health: number;
-  score: FamilyScore;
+function geminiSummary(account: ProxyAccount) {
+  return (account.quotaSummary ?? []).find((group) => group.displayName.toLowerCase().includes("gemini"));
 }
 
-function scoreAccountForFamily(account: ProxyAccount, family: Family, now: number): ScoreCandidate | null {
-  const groups = (account.quotaSummary ?? []).filter((group) => classifyFamily(group.displayName) === family);
+function scoreAccountForWindow(account: ProxyAccount, window: Window): ScoreCandidate | null {
+  const summary = geminiSummary(account);
+  const bucket = summary?.buckets.find((candidate) => candidate.window === window);
 
-  let fraction: number | null = null;
-  let weekly: number | undefined;
-  let fiveHour: number | undefined;
-  const resetCandidates: Array<string | undefined> = [];
+  if (bucket && isFiniteFraction(bucket.remainingFraction)) {
+    return {
+      health: healthWeight(account),
+      fraction: bucket.remainingFraction,
+      resetTimeIso: bucket.resetTime,
+    };
+  }
 
-  for (const group of groups) {
-    for (const bucket of group.buckets) {
-      resetCandidates.push(bucket.resetTime);
-      const value = bucket.remainingFraction;
-      if (bucket.window === "weekly") weekly = value;
-      else if (bucket.window === "5h") fiveHour = value;
+  // Starter accounts (and old proxy responses before quotaSummary is ready)
+  // only have the fetchAvailableModels rolling quota. It corresponds to 5h;
+  // it must not be used to fabricate a 7d value.
+  if (window === "5h") {
+    const legacy = (account.quota ?? []).find((entry) =>
+      entry.groupName.toLowerCase().includes("gemini") && isFiniteFraction(entry.remainingFraction),
+    );
+    if (legacy && isFiniteFraction(legacy.remainingFraction)) {
+      return {
+        health: healthWeight(account),
+        fraction: legacy.remainingFraction,
+        resetTimeIso: legacy.resetTime,
+      };
     }
   }
 
-  if (groups.length === 0) {
-    // Legacy flat quota fallback: use the most limiting group of the family.
-    const legacy = (account.quota ?? []).filter((group) => classifyFamily(group.groupName) === family);
-    for (const group of legacy) {
-      if (isFiniteFraction(group.remainingFraction)) {
-        if (fraction === null || group.remainingFraction < fraction) {
-          fraction = group.remainingFraction;
-        }
-      }
-      resetCandidates.push(group.resetTime);
-    }
-  } else {
-    if (weekly !== undefined || fiveHour !== undefined) {
-      const candidates = [weekly, fiveHour].filter((value): value is number => isFiniteFraction(value));
-      if (candidates.length > 0) {
-        fraction = Math.min(...candidates);
-      }
-    }
-  }
-
-  if (fraction === null) return null;
-
-  const resetTimeIso = earliestFutureReset(resetCandidates, now);
-  const health = isFiniteFraction(account.effectiveHealthScore) ? (account.effectiveHealthScore as number) : 1;
-
-  return { health, score: { fraction, resetTimeIso } };
+  return null;
 }
 
-function buildFamilyEntry(family: Family, status: ProxyStatus, now: number): QuotaEntry | null {
+function buildWindowEntry(status: ProxyStatus, window: Window, now: number): QuotaEntry | null {
   const scores = (status.accounts ?? [])
-    .map((account) => scoreAccountForFamily(account, family, now))
+    .map((account) => scoreAccountForWindow(account, window))
     .filter((candidate): candidate is ScoreCandidate => candidate !== null);
 
   if (scores.length === 0) return null;
@@ -115,18 +98,23 @@ function buildFamilyEntry(family: Family, status: ProxyStatus, now: number): Quo
   let weightedSum = 0;
   let weightSum = 0;
   for (const candidate of scores) {
-    weightedSum += candidate.score.fraction * candidate.health;
+    weightedSum += candidate.fraction * candidate.health;
     weightSum += candidate.health;
   }
 
-  const average = weightSum > 0 ? weightedSum / weightSum : 0;
-  const resetTimeIso = earliestFutureReset(scores.map((candidate) => candidate.score.resetTimeIso), now);
+  // If every account has zero health, avoid division by zero and report the
+  // unweighted average rather than making a healthy quota appear exhausted.
+  const average = weightSum > 0
+    ? weightedSum / weightSum
+    : scores.reduce((sum, candidate) => sum + candidate.fraction, 0) / scores.length;
+  const resetTimeIso = earliestFutureReset(scores.map((candidate) => candidate.resetTimeIso), now);
+  const label = window === "weekly" ? "7d" : "5h";
 
   return {
     kind: "percent",
-    name: `${ANTIGRAVITY_LABEL} ${family === "gemini" ? "Gemini" : "Claude"}`,
+    name: `${ANTIGRAVITY_LABEL} ${label}`,
     group: ANTIGRAVITY_LABEL,
-    label: family === "gemini" ? "Gemini:" : "Claude:",
+    label,
     percentRemaining: Math.round(average * 100),
     ...(resetTimeIso ? { resetTimeIso } : {}),
   };
@@ -134,12 +122,7 @@ function buildFamilyEntry(family: Family, status: ProxyStatus, now: number): Quo
 
 export function buildAntigravityEntries(status: ProxyStatus): QuotaEntry[] {
   const now = Date.now();
-  const entries: QuotaEntry[] = [];
-
-  for (const family of ["gemini", "claude"] as const) {
-    const entry = buildFamilyEntry(family, status, now);
-    if (entry) entries.push(entry);
-  }
-
-  return entries;
+  return (["5h", "weekly"] as const)
+    .map((window) => buildWindowEntry(status, window, now))
+    .filter((entry): entry is QuotaEntry => entry !== null);
 }
