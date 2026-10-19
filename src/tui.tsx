@@ -80,9 +80,13 @@ function buildCompactState(result: CollectResult, previous: CompactState): Compa
 
 function extractSessionModelMeta(input: unknown): SessionModelMeta {
   if (!input || typeof input !== "object") return {};
-  const item = input as { model?: { providerID?: string; id?: string } };
+  const direct = input as { providerID?: string; id?: string; modelID?: string };
+  if (direct.providerID && (direct.id || direct.modelID)) {
+    return { providerID: direct.providerID, modelID: direct.id ?? direct.modelID };
+  }
+  const item = input as { model?: { providerID?: string; id?: string; modelID?: string } };
   const providerID = item.model?.providerID;
-  const modelID = item.model?.id;
+  const modelID = item.model?.id ?? item.model?.modelID;
   return providerID || modelID ? { providerID, modelID } : {};
 }
 
@@ -118,7 +122,7 @@ function activeProviders(activeIds: string[]): Provider[] {
 
 interface QuotaState {
   state: () => CompactState;
-  resolveSession: (sessionID: string | undefined) => Promise<void>;
+  resolveSession: (sessionID: string | undefined, known?: SessionModelMeta) => Promise<void>;
   dispose: () => void;
 }
 
@@ -128,7 +132,7 @@ function createQuotaState(ctx: Ctx): QuotaState {
   let previous: CompactState = { status: "disabled" };
   let appliedIds = new Set<string>();
   let resolveVersion = 0;
-  let resolvedFor: string | undefined;
+  let resolvedKey: string | undefined;
 
   const lifecycle = createRefreshLifecycle({
     load: async () => {
@@ -160,8 +164,11 @@ function createQuotaState(ctx: Ctx): QuotaState {
     eventRefreshDelaysMs: EVENT_REFRESH_DELAYS_MS,
     recoveryDelaysMs: MOUNT_RECOVERY_DELAYS_MS,
     subscribe: (scheduleRefresh) => [
-      // A turn finished: this is the moment quota actually changed.
-      ctx.data.on("session.idle", () => scheduleRefresh()),
+      // A turn finished in OpenCode v2: refresh quota.
+      ctx.data.on("session.execution.succeeded" as any, () => scheduleRefresh()),
+      ctx.data.on("session.execution.failed" as any, () => scheduleRefresh()),
+      ctx.data.on("session.execution.interrupted" as any, () => scheduleRefresh()),
+      ctx.data.on("session.idle" as any, () => scheduleRefresh()),
       ctx.data.on("session.revert.committed", () => scheduleRefresh()),
       // Long agentic runs only go idle at the very end; usage updates arrive
       // per step, throttled so a run costs one refresh per window.
@@ -174,7 +181,7 @@ function createQuotaState(ctx: Ctx): QuotaState {
       // sessions' switches are ignored.
       ctx.data.on("session.model.selected", (event) => {
         if (event.data.sessionID !== currentSession) return;
-        resolvedFor = undefined;
+        resolvedKey = undefined;
         void resolve(currentSession, extractSessionModelMeta(event.data));
       }),
     ],
@@ -183,17 +190,21 @@ function createQuotaState(ctx: Ctx): QuotaState {
   let currentSession: string | undefined;
   const resolve = async (sessionID: string | undefined, known?: SessionModelMeta) => {
     currentSession = sessionID;
-    if (sessionID === resolvedFor) return;
-    resolvedFor = sessionID;
-    const version = ++resolveVersion;
     if (!sessionID) {
+      if (resolvedKey === undefined) return;
+      resolvedKey = undefined;
       setActiveIds([]);
       lifecycle.reload();
       return;
     }
 
+    const version = ++resolveVersion;
     const meta = known ?? (await getSessionModelMeta(ctx, sessionID));
     if (version !== resolveVersion) return;
+
+    const key = `${sessionID}:${meta.providerID ?? ""}/${meta.modelID ?? ""}`;
+    if (key === resolvedKey) return;
+    resolvedKey = key;
 
     const ids = PROVIDERS.filter((provider) => provider.matchesModel(meta)).map(
       (provider) => provider.id,
@@ -333,7 +344,9 @@ function StatusLine(props: {
   sessionID?: string;
 }) {
   createEffect(() => {
-    void props.quota.resolveSession(props.sessionID);
+    const currentModel = (props.ctx as any).model?.current?.();
+    const knownMeta = currentModel ? extractSessionModelMeta(currentModel) : undefined;
+    void props.quota.resolveSession(props.sessionID, knownMeta);
   });
 
   const visible = () => {
